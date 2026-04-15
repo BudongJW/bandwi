@@ -1,8 +1,11 @@
 {
   "manifest_version": 3,
-  "name": "Bandwi VPN",
+  "name": "Bandwi VPN - Free P2P Proxy",
   "version": "0.1.0",
-  "description": "Free VPN powered by P2P residential proxy network",
+  "version_name": "0.1.0 Beta",
+  "description": "Free VPN powered by a peer-to-peer residential proxy network. Browse through real IPs while contributing yours to help others.",
+  "homepage_url": "https://github.com/BudongJW/bandwi",
+  "minimum_chrome_version": "110",
   "permissions": [
     "proxy",
     "storage",
