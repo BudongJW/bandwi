@@ -11,7 +11,8 @@
     "storage",
     "alarms",
     "webRequest",
-    "offscreen"
+    "offscreen",
+    "privacy"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

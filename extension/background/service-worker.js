@@ -43,17 +43,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         state.vpnConnected = !!ok;
 
         if (ok) {
-          const proxy = proxyManager.currentProxy
-            ? {
-                addr: proxyManager.currentProxy.addr,
-                country: proxyManager.currentProxy.country,
-                proxyType: proxyManager.currentProxy.proxyType || "socks5",
-              }
-            : null;
-          await chrome.storage.local.set({
-            vpnStatus: "connected",
-            vpnProxy: proxy,
-          });
+          // proxyManager.connect() already saved to storage
+          // Just sync in-memory state
         } else {
           await chrome.storage.local.set({
             vpnStatus: "failed",

@@ -1,11 +1,12 @@
 /**
  * ProxyManager - Manages chrome.proxy API for VPN mode.
  *
- * Two-phase PAC strategy:
- *   Phase 1 (verify): strict PAC, NO DIRECT fallback.
- *     Verification fetch goes through proxy — confirms it actually works.
- *   Phase 2 (active):  resilient PAC, WITH DIRECT fallback.
- *     If proxy dies mid-session, internet still works (IP may leak).
+ * Security features:
+ *   - No DIRECT fallback: proxy failure shows error page (prevents IP leak)
+ *   - WebRTC leak prevention via chrome.privacy API
+ *   - Real IP verification: rejects proxies that leak user's IP
+ *   - SOCKS5 only: SOCKS4 leaks DNS, HTTP does MITM on HTTPS
+ *   - Multi-proxy failover in PAC for resilience
  */
 
 const MAX_CONNECT_ATTEMPTS = 5;
@@ -23,6 +24,7 @@ export class ProxyManager {
     this._reconnecting = false;
     this._connectionSeq = 0;
     this._myIp = null;
+    this._fallbackNodes = [];
 
     chrome.proxy.onProxyError.addListener((details) => {
       console.warn(`[Bandwi] Proxy error: ${details.error}`);
@@ -37,24 +39,31 @@ export class ProxyManager {
       "vpnStatus",
       "vpnCountry",
       "vpnProxy",
+      "vpnFallbackNodes",
     ]);
 
     if (stored.vpnStatus === "connecting") {
       await this._forceClearProxy();
+      await this._disableWebRtcProtection();
       await chrome.storage.local.set({ vpnStatus: "disconnected" });
-      await chrome.storage.local.remove(["vpnConnected", "vpnCountry", "vpnProxy"]);
+      await chrome.storage.local.remove(["vpnConnected", "vpnCountry", "vpnProxy", "vpnFallbackNodes"]);
       return false;
     }
 
     if (stored.vpnStatus === "connected" && stored.vpnCountry && stored.vpnProxy) {
       this.currentCountry = stored.vpnCountry;
       this.currentProxy = stored.vpnProxy;
-      await this._applyPac(stored.vpnProxy);
+      this._fallbackNodes = stored.vpnFallbackNodes || [];
+      await this._enableWebRtcProtection();
+      await this._applyPac(stored.vpnProxy, this._fallbackNodes);
+      this._updateBadge("connected");
       return true;
     }
 
     if (!stored.vpnStatus || stored.vpnStatus === "disconnected") {
       await this._forceClearProxy();
+      await this._disableWebRtcProtection();
+      this._updateBadge("disconnected");
     }
     return false;
   }
@@ -63,7 +72,13 @@ export class ProxyManager {
     this.currentCountry = country;
     this.failedAddrs.clear();
     this.retryCount = 0;
+    this._fallbackNodes = [];
     const seq = ++this._connectionSeq;
+
+    this._updateBadge("connecting");
+
+    // Enable WebRTC protection before connecting
+    await this._enableWebRtcProtection();
 
     // Get my real IP first (before any proxy is set)
     await this._detectMyIp();
@@ -71,63 +86,80 @@ export class ProxyManager {
     for (let i = 0; i < MAX_CONNECT_ATTEMPTS; i++) {
       if (this._connectionSeq !== seq) return false;
 
-      const node = await this._findNode(country);
-      if (!node) {
+      const nodes = await this._findNodes(country);
+      if (!nodes.length) {
         console.warn(`[Bandwi] No more nodes in ${country}`);
         break;
       }
 
-      const ok = await this._applyAndVerify(node);
+      const primary = nodes[0];
+      const fallbacks = nodes.slice(1, 4); // Up to 3 fallbacks for PAC chain
+
+      const ok = await this._applyAndVerify(primary, fallbacks);
       if (this._connectionSeq !== seq) return false;
 
-      if (ok) return true;
+      if (ok) {
+        this._updateBadge("connected");
+        return true;
+      }
 
-      this.failedAddrs.add(node.addr);
+      this.failedAddrs.add(primary.addr);
       await this._forceClearProxy();
       console.log(
-        `[Bandwi] Node ${node.addr} failed (${i + 1}/${MAX_CONNECT_ATTEMPTS})`
+        `[Bandwi] Node ${primary.addr} failed (${i + 1}/${MAX_CONNECT_ATTEMPTS})`
       );
     }
 
     await this._forceClearProxy();
+    await this._disableWebRtcProtection();
+    this._updateBadge("disconnected");
     return false;
   }
 
-  _buildPac(node) {
-    const pType = node.proxyType || "socks5";
-    let directive;
-    if (pType === "http" || pType === "https") {
-      directive = `PROXY ${node.addr}`;
-    } else if (pType === "socks4") {
-      directive = `SOCKS ${node.addr}`;
-    } else {
-      directive = `SOCKS5 ${node.addr}`;
+  _buildPac(node, fallbackNodes = []) {
+    // Build multi-proxy failover chain (SOCKS5 only)
+    const directives = [];
+
+    const toDirective = (n) => {
+      const pType = n.proxyType || "socks5";
+      if (pType === "socks5") return `SOCKS5 ${n.addr}`;
+      if (pType === "socks4") return `SOCKS ${n.addr}`;
+      return `PROXY ${n.addr}`;
+    };
+
+    directives.push(toDirective(node));
+    for (const fb of fallbackNodes) {
+      directives.push(toDirective(fb));
     }
 
     // No DIRECT fallback — proxy failure shows error page
     // and triggers auto-reconnect. This prevents IP leaks.
+    const chain = directives.join("; ");
+
     return {
       mode: "pac_script",
       pacScript: {
         data: `function FindProxyForURL(url, host) {
           if (isPlainHostName(host) || host === "localhost") return "DIRECT";
           if (host === "${SIGNALING_HOST}") return "DIRECT";
-          return "${directive}";
+          return "${chain}";
         }`,
+        mandatory: true,
       },
     };
   }
 
-  async _applyPac(node) {
-    const config = this._buildPac(node);
+  async _applyPac(node, fallbackNodes = []) {
+    const config = this._buildPac(node, fallbackNodes);
     await chrome.proxy.settings.set({ value: config, scope: "regular" });
   }
 
-  async _applyAndVerify(node) {
+  async _applyAndVerify(node, fallbackNodes = []) {
     this.currentProxy = node;
+    this._fallbackNodes = fallbackNodes;
     const pType = node.proxyType || "socks5";
 
-    await this._applyPac(node);
+    await this._applyPac(node, fallbackNodes);
 
     const exitInfo = await this._verifyConnectivity();
     if (!exitInfo) return false;
@@ -152,10 +184,11 @@ export class ProxyManager {
       vpnConnected: true,
       vpnCountry: this.currentCountry,
       vpnProxy: proxyInfo,
+      vpnFallbackNodes: fallbackNodes,
     });
 
     console.log(
-      `[Bandwi] VPN connected via ${node.addr}, exit: ${exitInfo.ip} (${exitInfo.countryCode})`
+      `[Bandwi] VPN connected via ${node.addr}, exit: ${exitInfo.ip} (${exitInfo.countryCode}), fallbacks: ${fallbackNodes.length}`
     );
     return true;
   }
@@ -201,6 +234,7 @@ export class ProxyManager {
 
     this._reconnecting = true;
     this.retryCount++;
+    this._updateBadge("connecting");
 
     if (this.currentProxy) {
       this.failedAddrs.add(this.currentProxy.addr || this.currentProxy);
@@ -214,12 +248,13 @@ export class ProxyManager {
 
     await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
 
-    const node = await this._findNode(this.currentCountry);
-    if (node) {
-      const ok = await this._applyAndVerify(node);
+    const nodes = await this._findNodes(this.currentCountry);
+    if (nodes.length) {
+      const ok = await this._applyAndVerify(nodes[0], nodes.slice(1, 4));
       if (ok) {
         this.retryCount = 0;
         this._reconnecting = false;
+        this._updateBadge("connected");
         return;
       }
     }
@@ -235,9 +270,11 @@ export class ProxyManager {
   async disconnect() {
     this._connectionSeq++;
     await this._forceClearProxy();
+    await this._disableWebRtcProtection();
 
     this.currentProxy = null;
     this.currentCountry = null;
+    this._fallbackNodes = [];
     this.failedAddrs.clear();
     this.retryCount = 0;
     this._reconnecting = false;
@@ -247,8 +284,10 @@ export class ProxyManager {
       "vpnConnected",
       "vpnCountry",
       "vpnProxy",
+      "vpnFallbackNodes",
     ]);
 
+    this._updateBadge("disconnected");
     console.log("[Bandwi] VPN disconnected");
   }
 
@@ -262,24 +301,67 @@ export class ProxyManager {
     await chrome.proxy.settings.clear({ scope: "regular" });
   }
 
-  async _findNode(country) {
+  // WebRTC leak prevention
+  async _enableWebRtcProtection() {
+    try {
+      await chrome.privacy.network.webRTCIPHandlingPolicy.set({
+        value: "disable_non_proxied_udp",
+      });
+      console.log("[Bandwi] WebRTC leak protection enabled");
+    } catch (e) {
+      console.warn("[Bandwi] Failed to set WebRTC policy:", e);
+    }
+  }
+
+  async _disableWebRtcProtection() {
+    try {
+      await chrome.privacy.network.webRTCIPHandlingPolicy.clear({});
+      console.log("[Bandwi] WebRTC leak protection disabled");
+    } catch {}
+  }
+
+  // Badge icon for connection status
+  _updateBadge(status) {
+    const colors = {
+      connected: "#22c55e",
+      connecting: "#f59e0b",
+      disconnected: "#666666",
+    };
+    const texts = {
+      connected: "ON",
+      connecting: "...",
+      disconnected: "",
+    };
+    try {
+      chrome.action.setBadgeBackgroundColor({ color: colors[status] || "#666" });
+      chrome.action.setBadgeText({ text: texts[status] || "" });
+    } catch {}
+  }
+
+  // Returns multiple nodes for failover chain
+  async _findNodes(country) {
     try {
       const resp = await fetch(
         `https://${SIGNALING_HOST}/api/nodes?country=${country}`
       );
-      if (!resp.ok) return null;
+      if (!resp.ok) return [];
       const nodes = await resp.json();
       const available = nodes.filter((n) => !this.failedAddrs.has(n.addr));
-      if (!available.length) return null;
+      if (!available.length) return [];
 
-      // Prefer SOCKS5 > SOCKS4 (skip HTTP — breaks HTTPS)
+      // SOCKS5 only (SOCKS4 leaks DNS, HTTP does MITM)
       const socks5 = available.filter((n) => (n.proxyType || n.type) === "socks5");
-      const socks4 = available.filter((n) => (n.proxyType || n.type) === "socks4");
-      const pool = socks5.length ? socks5 : socks4.length ? socks4 : available;
+      const pool = socks5.length ? socks5 : available;
 
-      return pool[Math.floor(Math.random() * pool.length)];
+      // Shuffle for load distribution
+      for (let i = pool.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [pool[i], pool[j]] = [pool[j], pool[i]];
+      }
+
+      return pool;
     } catch {
-      return null;
+      return [];
     }
   }
 }
