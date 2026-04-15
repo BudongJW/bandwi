@@ -1,12 +1,11 @@
 /**
  * ProxyManager - Manages chrome.proxy API for VPN mode.
  *
- * All VPN state persisted to chrome.storage.local (survives SW hibernation).
- * Verifies proxy connectivity before committing.
- * Auto-reconnects to another node on failure.
- *
- * Key design: signaling server and verification URLs always bypass the proxy
- * via PAC script DIRECT rules, so fetches never go through the proxy being tested.
+ * Two-phase PAC strategy:
+ *   Phase 1 (verify): strict PAC, NO DIRECT fallback.
+ *     Verification fetch goes through proxy — confirms it actually works.
+ *   Phase 2 (active):  resilient PAC, WITH DIRECT fallback.
+ *     If proxy dies mid-session, internet still works (IP may leak).
  */
 
 const MAX_CONNECT_ATTEMPTS = 5;
@@ -14,7 +13,6 @@ const MAX_RETRIES = 3;
 const RETRY_DELAY_MS = 2000;
 const VERIFY_TIMEOUT_MS = 8000;
 const SIGNALING_HOST = "bandwi-signaling.dlawodnjs.workers.dev";
-const VERIFY_HOST = "httpbin.org";
 
 export class ProxyManager {
   constructor() {
@@ -24,6 +22,7 @@ export class ProxyManager {
     this.retryCount = 0;
     this._reconnecting = false;
     this._connectionSeq = 0;
+    this._myIp = null;
 
     chrome.proxy.onProxyError.addListener((details) => {
       console.warn(`[Bandwi] Proxy error: ${details.error}`);
@@ -33,7 +32,6 @@ export class ProxyManager {
     });
   }
 
-  // Restore state from storage and re-apply PAC script
   async restore() {
     const stored = await chrome.storage.local.get([
       "vpnStatus",
@@ -41,16 +39,8 @@ export class ProxyManager {
       "vpnProxy",
     ]);
 
-    // Clear stale "connecting" state (SW died mid-connect)
-    // Also clear any leftover PAC script from the interrupted connection
     if (stored.vpnStatus === "connecting") {
-      try {
-        await chrome.proxy.settings.set({
-          value: { mode: "direct" },
-          scope: "regular",
-        });
-      } catch {}
-      await chrome.proxy.settings.clear({ scope: "regular" });
+      await this._forceClearProxy();
       await chrome.storage.local.set({ vpnStatus: "disconnected" });
       await chrome.storage.local.remove(["vpnConnected", "vpnCountry", "vpnProxy"]);
       return false;
@@ -59,20 +49,12 @@ export class ProxyManager {
     if (stored.vpnStatus === "connected" && stored.vpnCountry && stored.vpnProxy) {
       this.currentCountry = stored.vpnCountry;
       this.currentProxy = stored.vpnProxy;
-      // Re-apply PAC script (chrome.proxy doesn't persist across SW restarts)
-      await this._applyPac(stored.vpnProxy);
+      await this._applyPac(stored.vpnProxy, true);
       return true;
     }
 
-    // No VPN state but PAC might be lingering from a crash
     if (!stored.vpnStatus || stored.vpnStatus === "disconnected") {
-      try {
-        await chrome.proxy.settings.set({
-          value: { mode: "direct" },
-          scope: "regular",
-        });
-      } catch {}
-      await chrome.proxy.settings.clear({ scope: "regular" });
+      await this._forceClearProxy();
     }
     return false;
   }
@@ -83,8 +65,11 @@ export class ProxyManager {
     this.retryCount = 0;
     const seq = ++this._connectionSeq;
 
+    // Get my real IP first (before any proxy is set)
+    await this._detectMyIp();
+
     for (let i = 0; i < MAX_CONNECT_ATTEMPTS; i++) {
-      if (this._connectionSeq !== seq) return false; // cancelled
+      if (this._connectionSeq !== seq) return false;
 
       const node = await this._findNode(country);
       if (!node) {
@@ -93,46 +78,51 @@ export class ProxyManager {
       }
 
       const ok = await this._applyAndVerify(node);
-      if (this._connectionSeq !== seq) return false; // cancelled
+      if (this._connectionSeq !== seq) return false;
 
       if (ok) return true;
 
       this.failedAddrs.add(node.addr);
-      // Clear proxy before trying next node
-      await chrome.proxy.settings.clear({ scope: "regular" });
+      await this._forceClearProxy();
       console.log(
         `[Bandwi] Node ${node.addr} failed (${i + 1}/${MAX_CONNECT_ATTEMPTS})`
       );
     }
 
-    await chrome.proxy.settings.clear({ scope: "regular" });
+    await this._forceClearProxy();
     return false;
   }
 
-  async _applyPac(node) {
+  // Build PAC script
+  // strict=false: add DIRECT fallback (for active use)
+  // strict=true:  no fallback (for verification — must go through proxy)
+  _buildPac(node, strict) {
     const pType = node.proxyType || "socks5";
-    let proxyDirective;
+    let directive;
     if (pType === "http" || pType === "https") {
-      proxyDirective = `PROXY ${node.addr}`;
+      directive = `PROXY ${node.addr}`;
     } else if (pType === "socks4") {
-      proxyDirective = `SOCKS ${node.addr}`;
+      directive = `SOCKS ${node.addr}`;
     } else {
-      proxyDirective = `SOCKS5 ${node.addr}`;
+      directive = `SOCKS5 ${node.addr}`;
     }
 
-    const config = {
+    const fallback = strict ? "" : "; DIRECT";
+
+    return {
       mode: "pac_script",
       pacScript: {
         data: `function FindProxyForURL(url, host) {
           if (isPlainHostName(host) || host === "localhost") return "DIRECT";
           if (host === "${SIGNALING_HOST}") return "DIRECT";
-          if (host === "${VERIFY_HOST}") return "DIRECT";
-          if (host === "ip-api.com") return "DIRECT";
-          return "${proxyDirective}; DIRECT";
+          return "${directive}${fallback}";
         }`,
       },
     };
+  }
 
+  async _applyPac(node, withFallback) {
+    const config = this._buildPac(node, !withFallback);
     await chrome.proxy.settings.set({ value: config, scope: "regular" });
   }
 
@@ -140,13 +130,21 @@ export class ProxyManager {
     this.currentProxy = node;
     const pType = node.proxyType || "socks5";
 
-    await this._applyPac(node);
+    // Phase 1: strict PAC (no DIRECT fallback) — verify through proxy
+    await this._applyPac(node, false);
 
-    // Verify proxy works and get actual exit IP/country
     const exitInfo = await this._verifyConnectivity();
     if (!exitInfo) return false;
 
-    // Use actual exit country from verification, not the registered country
+    // Check that exit IP is different from our real IP
+    if (this._myIp && exitInfo.ip === this._myIp) {
+      console.warn(`[Bandwi] Proxy ${node.addr} leaks real IP, skipping`);
+      return false;
+    }
+
+    // Phase 2: switch to resilient PAC (with DIRECT fallback)
+    await this._applyPac(node, true);
+
     const proxyInfo = {
       addr: node.addr,
       country: exitInfo.countryCode || node.country,
@@ -164,27 +162,35 @@ export class ProxyManager {
     });
 
     console.log(
-      `[Bandwi] VPN connected via ${node.addr}, exit IP: ${exitInfo.ip} (${exitInfo.countryCode})`
+      `[Bandwi] VPN connected via ${node.addr}, exit: ${exitInfo.ip} (${exitInfo.countryCode})`
     );
     return true;
   }
 
-  // Returns { ip, countryCode } or null on failure
+  async _detectMyIp() {
+    try {
+      const resp = await fetch("http://ip-api.com/json/?fields=query", {
+        signal: AbortSignal.timeout(5000),
+      });
+      const data = await resp.json();
+      this._myIp = data.query || null;
+      console.log(`[Bandwi] My real IP: ${this._myIp}`);
+    } catch {
+      this._myIp = null;
+    }
+  }
+
+  // Verification: fetch IP check through the proxy (strict PAC active)
   async _verifyConnectivity() {
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
-
       const resp = await fetch(
         "http://ip-api.com/json/?fields=query,countryCode",
-        { signal: controller.signal }
+        { signal: AbortSignal.timeout(VERIFY_TIMEOUT_MS) }
       );
-      clearTimeout(timer);
-
       if (!resp.ok) return null;
       const data = await resp.json();
       if (!data.query) return null;
-      console.log(`[Bandwi] Proxy verified, exit: ${data.query} (${data.countryCode})`);
+      console.log(`[Bandwi] Verify exit: ${data.query} (${data.countryCode})`);
       return { ip: data.query, countryCode: data.countryCode };
     } catch {
       return null;
@@ -196,7 +202,6 @@ export class ProxyManager {
       if (this.retryCount >= MAX_RETRIES) {
         console.warn("[Bandwi] Max retries reached, disconnecting");
         await this.disconnect();
-        await chrome.storage.local.set({ vpnStatus: "disconnected" });
       }
       return;
     }
@@ -205,14 +210,13 @@ export class ProxyManager {
     this.retryCount++;
 
     if (this.currentProxy) {
-      this.failedAddrs.add(this.currentProxy.addr);
+      this.failedAddrs.add(this.currentProxy.addr || this.currentProxy);
     }
 
-    // Clear broken proxy before finding a new node
-    await chrome.proxy.settings.clear({ scope: "regular" });
+    await this._forceClearProxy();
 
     console.log(
-      `[Bandwi] Auto-reconnect attempt ${this.retryCount}/${MAX_RETRIES}`
+      `[Bandwi] Auto-reconnect ${this.retryCount}/${MAX_RETRIES}`
     );
 
     await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
@@ -223,7 +227,6 @@ export class ProxyManager {
       if (ok) {
         this.retryCount = 0;
         this._reconnecting = false;
-        console.log("[Bandwi] Auto-reconnect successful");
         return;
       }
     }
@@ -233,21 +236,12 @@ export class ProxyManager {
       this._autoReconnect();
     } else {
       await this.disconnect();
-      await chrome.storage.local.set({ vpnStatus: "disconnected" });
     }
   }
 
   async disconnect() {
     this._connectionSeq++;
-
-    // Force immediate DIRECT, then clear — ensures no stale PAC lingers
-    try {
-      await chrome.proxy.settings.set({
-        value: { mode: "direct" },
-        scope: "regular",
-      });
-    } catch {}
-    await chrome.proxy.settings.clear({ scope: "regular" });
+    await this._forceClearProxy();
 
     this.currentProxy = null;
     this.currentCountry = null;
@@ -265,6 +259,16 @@ export class ProxyManager {
     console.log("[Bandwi] VPN disconnected");
   }
 
+  async _forceClearProxy() {
+    try {
+      await chrome.proxy.settings.set({
+        value: { mode: "direct" },
+        scope: "regular",
+      });
+    } catch {}
+    await chrome.proxy.settings.clear({ scope: "regular" });
+  }
+
   async _findNode(country) {
     try {
       const resp = await fetch(
@@ -275,8 +279,7 @@ export class ProxyManager {
       const available = nodes.filter((n) => !this.failedAddrs.has(n.addr));
       if (!available.length) return null;
 
-      // Prefer SOCKS5 > SOCKS4 > HTTP
-      // HTTP proxies break HTTPS (SSL MITM / ERR_CERT_AUTHORITY_INVALID)
+      // Prefer SOCKS5 > SOCKS4 (skip HTTP — breaks HTTPS)
       const socks5 = available.filter((n) => (n.proxyType || n.type) === "socks5");
       const socks4 = available.filter((n) => (n.proxyType || n.type) === "socks4");
       const pool = socks5.length ? socks5 : socks4.length ? socks4 : available;
