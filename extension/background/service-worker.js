@@ -50,6 +50,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
           state.dataRelayed = 0;
           state.uptimeMs = 0;
         }
+        await chrome.storage.local.set({ nodeEnabled: state.nodeEnabled });
         break;
 
       case "settings:bwLimit":
@@ -70,6 +71,27 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   })();
   return true; // async sendResponse
 });
+
+// ── Auto-enable node sharing on first install ─────────────
+chrome.runtime.onInstalled.addListener(async (details) => {
+  if (details.reason === "install") {
+    // Free users share their node by default
+    await peerNode.start(state.bwLimit);
+    state.nodeEnabled = true;
+    state.uptimeStart = Date.now();
+    await chrome.storage.local.set({ nodeEnabled: true });
+  }
+});
+
+// Restore node state when service worker wakes up
+(async () => {
+  const stored = await chrome.storage.local.get("nodeEnabled");
+  if (stored.nodeEnabled && !state.nodeEnabled) {
+    await peerNode.start(state.bwLimit);
+    state.nodeEnabled = true;
+    state.uptimeStart = Date.now();
+  }
+})();
 
 // ── Keep-alive alarm (Manifest V3 service workers can idle) ─
 chrome.alarms.create("keepalive", { periodInMinutes: 0.5 });

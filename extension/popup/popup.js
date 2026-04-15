@@ -58,12 +58,16 @@ bwLimit.addEventListener("input", () => {
 
   if (state.vpnConnected) setVpnState(true);
 
+  nodeToggle.checked = state.nodeEnabled;
+  nodeStats.style.display = state.nodeEnabled ? "block" : "none";
   if (state.nodeEnabled) {
-    nodeToggle.checked = true;
-    nodeStats.style.display = "block";
     $("peerCount").textContent = state.peerCount || 0;
     $("dataRelayed").textContent = formatBytes(state.dataRelayed || 0);
     $("uptime").textContent = formatUptime(state.uptimeMs || 0);
+    if (!state.vpnConnected) {
+      statusDot.className = "status-indicator node-active";
+      statusText.textContent = "Node Active";
+    }
   }
 
   if (state.bwLimit) {
