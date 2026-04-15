@@ -18,31 +18,6 @@ Users get free VPN access to overseas IPs while simultaneously contributing thei
 
 Your browser traffic is routed through a peer's residential IP, while your IP serves as an exit node for others. All traffic is filtered — no access to private networks or dangerous ports.
 
-## Architecture
-
-```
-bandwi/
-  extension/           # Chrome Extension (Manifest V3)
-    manifest.json
-    popup/             # UI - connect/disconnect, node toggle, stats
-    background/        # Service Worker, WebRTC peer node, proxy manager
-    icons/
-  worker/              # Cloudflare Workers + Durable Objects (serverless)
-    src/index.js       # WebSocket signaling + REST API
-    wrangler.toml
-  server/              # Local dev signaling server (Node.js)
-    signaling.js
-```
-
-### Key Components
-
-| Component | Technology | Role |
-|-----------|-----------|------|
-| VPN Routing | `chrome.proxy` API + PAC script | Route browser traffic through peer SOCKS5 |
-| P2P Transport | WebRTC Data Channel | Direct peer-to-peer proxy relay |
-| Signaling | Cloudflare Workers + Durable Objects | Serverless peer discovery and WebRTC relay |
-| Node Registry | Durable Object in-memory Map + REST API | Track available nodes by country |
-
 ## Quick Start
 
 ### Chrome Extension
@@ -87,31 +62,6 @@ MIT
 3. **贡献** 你的IP作为代理节点（可选开关，带宽可设上限）
 
 你的浏览器流量通过对等节点的住宅IP路由，而你的IP则作为其他用户的出口节点。所有流量都经过过滤——禁止访问私有网络或危险端口。
-
-## 架构
-
-```
-bandwi/
-  extension/           # Chrome扩展 (Manifest V3)
-    manifest.json
-    popup/             # UI - 连接/断开、节点开关、统计
-    background/        # Service Worker、WebRTC对等节点、代理管理器
-    icons/
-  worker/              # Cloudflare Workers + Durable Objects（无服务器）
-    src/index.js       # WebSocket信令 + REST API
-    wrangler.toml
-  server/              # 本地开发信令服务器 (Node.js)
-    signaling.js
-```
-
-### 核心组件
-
-| 组件 | 技术 | 作用 |
-|------|------|------|
-| VPN路由 | `chrome.proxy` API + PAC脚本 | 通过对等SOCKS5路由浏览器流量 |
-| P2P传输 | WebRTC Data Channel | 点对点直接代理转发 |
-| 信令 | Cloudflare Workers + Durable Objects | 无服务器节点发现和WebRTC中继 |
-| 节点注册 | Durable Object内存Map + REST API | 按国家跟踪可用节点 |
 
 ## 快速开始
 
