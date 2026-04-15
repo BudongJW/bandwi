@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bandwi VPN</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Bandwi</h1>
+      <p class="subtitle">Free P2P VPN</p>
+    </header>
+
+    <div class="status-card">
+      <div class="status-indicator" id="statusDot"></div>
+      <span class="status-text" id="statusText">Disconnected</span>
+    </div>
+
+    <!-- VPN Mode -->
+    <section class="section">
+      <h2>VPN</h2>
+      <div class="country-select">
+        <label for="country">Exit Country</label>
+        <select id="country">
+          <option value="US">United States</option>
+          <option value="JP">Japan</option>
+          <option value="KR">South Korea</option>
+          <option value="SG">Singapore</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="btnConnect">Connect</button>
+    </section>
+
+    <!-- Node Contribution -->
+    <section class="section">
+      <h2>Node Contribution</h2>
+      <div class="toggle-row">
+        <span>Share my IP as proxy node</span>
+        <label class="toggle">
+          <input type="checkbox" id="nodeToggle">
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="node-stats" id="nodeStats" style="display:none;">
+        <div class="stat">
+          <span class="stat-label">Peers connected</span>
+          <span class="stat-value" id="peerCount">0</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Data relayed</span>
+          <span class="stat-value" id="dataRelayed">0 MB</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Uptime</span>
+          <span class="stat-value" id="uptime">0m</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Bandwidth Limit -->
+    <section class="section">
+      <h2>Settings</h2>
+      <div class="setting-row">
+        <label for="bwLimit">Bandwidth limit (Mbps)</label>
+        <input type="range" id="bwLimit" min="1" max="50" value="10">
+        <span id="bwValue">10</span>
+      </div>
+    </section>
+
+    <footer>
+      <a href="https://github.com/BudongJW/bandwi" target="_blank">GitHub</a>
+      <span class="version">v0.1.0</span>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

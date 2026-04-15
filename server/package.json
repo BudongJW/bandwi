@@ -1,0 +1,14 @@
+{
+  "name": "bandwi-server",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Bandwi signaling server for P2P proxy network",
+  "main": "signaling.js",
+  "scripts": {
+    "start": "node signaling.js",
+    "dev": "node --watch signaling.js"
+  },
+  "dependencies": {
+    "ws": "^8.16.0"
+  }
+}
