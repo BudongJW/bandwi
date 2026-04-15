@@ -230,7 +230,6 @@ export class ProxyManager {
 
   async _findNode(country) {
     try {
-      // Signaling server is in PAC DIRECT bypass list, always reachable
       const resp = await fetch(
         `https://${SIGNALING_HOST}/api/nodes?country=${country}`
       );
@@ -238,7 +237,14 @@ export class ProxyManager {
       const nodes = await resp.json();
       const available = nodes.filter((n) => !this.failedAddrs.has(n.addr));
       if (!available.length) return null;
-      return available[Math.floor(Math.random() * available.length)];
+
+      // Prefer SOCKS5 > SOCKS4 > HTTP
+      // HTTP proxies break HTTPS (SSL MITM / ERR_CERT_AUTHORITY_INVALID)
+      const socks5 = available.filter((n) => (n.proxyType || n.type) === "socks5");
+      const socks4 = available.filter((n) => (n.proxyType || n.type) === "socks4");
+      const pool = socks5.length ? socks5 : socks4.length ? socks4 : available;
+
+      return pool[Math.floor(Math.random() * pool.length)];
     } catch {
       return null;
     }
