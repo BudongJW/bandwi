@@ -11,3 +11,7 @@ bindings = [
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["SignalingDO"]
+
+# Cron trigger: fetch free proxies every 20 minutes
+[triggers]
+crons = ["*/20 * * * *"]

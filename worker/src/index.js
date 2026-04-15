@@ -16,10 +16,30 @@ export default {
       return new Response(null, { headers: corsHeaders() });
     }
 
+    // Manual cron trigger (API key protected)
+    if (request.method === "POST" && url.pathname === "/api/cron/trigger") {
+      const apiKey = request.headers.get("X-API-Key");
+      if (!env.BANDWI_API_KEY || apiKey !== env.BANDWI_API_KEY) {
+        return jsonResponse({ error: "unauthorized" }, 401);
+      }
+      await fetchAndRegisterProxies(env);
+      // Return current stats
+      const id = env.SIGNALING.idFromName("global");
+      const stub = env.SIGNALING.get(id);
+      const statsResp = await stub.fetch(new Request("https://internal/api/stats"));
+      const stats = await statsResp.json();
+      return jsonResponse({ ok: true, triggered: true, ...stats });
+    }
+
     // All traffic goes to a single Durable Object instance
     const id = env.SIGNALING.idFromName("global");
     const stub = env.SIGNALING.get(id);
     return stub.fetch(request);
+  },
+
+  // Cron trigger: fetch free proxies and register as static nodes
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(fetchAndRegisterProxies(env));
   },
 };
 
@@ -45,8 +65,24 @@ export class SignalingDO {
     // clientId -> { ws, connectedNode }
     this.clients = new Map();
     this.idCounter = 0;
-    // Static proxy TTL: 30 minutes
-    this.STATIC_TTL_MS = 30 * 60 * 1000;
+    // Static proxy TTL: 25 minutes (cron runs every 20 min, so always fresh)
+    this.STATIC_TTL_MS = 25 * 60 * 1000;
+
+    // Restore static nodes from DO Storage on wake-up
+    this._restored = this.state.blockConcurrencyWhile(async () => {
+      const stored = await this.state.storage.get("staticNodes");
+      if (stored) {
+        for (const [id, node] of Object.entries(stored)) {
+          this.nodes.set(id, node);
+        }
+        // Update idCounter to avoid collisions
+        const maxId = Object.keys(stored).reduce((max, k) => {
+          const num = parseInt(k.replace("static_", ""), 10);
+          return isNaN(num) ? max : Math.max(max, num);
+        }, 0);
+        this.idCounter = maxId;
+      }
+    });
   }
 
   nextId() {
@@ -131,6 +167,9 @@ export class SignalingDO {
         added++;
         byCountry[p.country] = (byCountry[p.country] || 0) + 1;
       }
+
+      // Persist static nodes to DO Storage
+      await this._persistStatic();
 
       return jsonResponse({
         ok: true,
@@ -264,8 +303,23 @@ export class SignalingDO {
     }
   }
 
-  // Durable Objects auto-hibernate when no connections remain.
-  // P2P nodes cleaned on WebSocket close; static nodes cleaned on TTL.
+  // Save static nodes to DO Storage (survives hibernate)
+  async _persistStatic() {
+    const staticNodes = {};
+    for (const [id, node] of this.nodes) {
+      if (node.type === "static") {
+        staticNodes[id] = {
+          addr: node.addr,
+          country: node.country,
+          proxyType: node.proxyType,
+          bwLimit: node.bwLimit,
+          lastSeen: node.lastSeen,
+          type: "static",
+        };
+      }
+    }
+    await this.state.storage.put("staticNodes", staticNodes);
+  }
 }
 
 // ── Helpers ────────────────────────────────────────────────
@@ -281,4 +335,62 @@ function jsonResponse(data, status = 200) {
       "Access-Control-Allow-Origin": "*",
     },
   });
+}
+
+// ── Cron: Free Proxy Fetcher ──────────────────────────────
+const PROXY_SOURCES = [
+  {
+    url: "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=json",
+    parse: parseProxyScrape,
+  },
+];
+
+async function fetchAndRegisterProxies(env) {
+  const proxies = [];
+
+  for (const source of PROXY_SOURCES) {
+    try {
+      const resp = await fetch(source.url, {
+        headers: { "User-Agent": "Bandwi-Worker/0.1" },
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json();
+      const parsed = source.parse(data);
+      proxies.push(...parsed);
+    } catch {
+      // Source unavailable, skip
+    }
+  }
+
+  if (!proxies.length) return;
+
+  // Register to our own Durable Object
+  const id = env.SIGNALING.idFromName("global");
+  const stub = env.SIGNALING.get(id);
+  await stub.fetch(new Request("https://internal/api/nodes/register", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-API-Key": env.BANDWI_API_KEY || "",
+    },
+    body: JSON.stringify(proxies),
+  }));
+}
+
+function parseProxyScrape(data) {
+  const results = [];
+  const items = data.proxies || [];
+  for (const p of items) {
+    if (!p.alive || !p.ip || !p.port || !p.ip_data?.countryCode) continue;
+    const proto = (p.protocol || "http").toLowerCase();
+    let type = "http";
+    if (proto.includes("socks5")) type = "socks5";
+    else if (proto.includes("socks4")) type = "socks4";
+    results.push({
+      addr: `${p.ip}:${p.port}`,
+      country: p.ip_data.countryCode,
+      type,
+    });
+  }
+  return results;
 }
