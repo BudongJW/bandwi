@@ -60,8 +60,20 @@ header h1 {
   box-shadow: 0 0 6px #a78bfa;
 }
 
+.status-info {
+  display: flex;
+  flex-direction: column;
+}
+
 .status-text {
   font-size: 13px;
+}
+
+.status-detail {
+  font-size: 11px;
+  color: #888;
+  margin-top: 2px;
+  font-family: 'Consolas', 'Monaco', monospace;
 }
 
 .section {

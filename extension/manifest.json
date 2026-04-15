@@ -10,7 +10,8 @@
     "proxy",
     "storage",
     "alarms",
-    "webRequest"
+    "webRequest",
+    "offscreen"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

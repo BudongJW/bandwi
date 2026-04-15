@@ -1,13 +1,13 @@
 /**
  * Bandwi Service Worker
  * Manages VPN proxy routing and P2P node lifecycle.
+ * All connection state persisted to chrome.storage.local
+ * to survive MV3 service worker hibernation.
  */
 
 import { PeerNode } from "./peer-node.js";
 import { ProxyManager } from "./proxy-manager.js";
 
-// Production: wss://bandwi-signaling.<your-subdomain>.workers.dev
-// Local dev:  ws://localhost:8787
 const SIGNALING_URL = "wss://bandwi-signaling.dlawodnjs.workers.dev";
 
 const state = {
@@ -25,12 +25,47 @@ const proxyManager = new ProxyManager();
 
 // ── Message Handler ────────────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  if (msg.target === "offscreen") return false;
+
   (async () => {
     switch (msg.type) {
       case "vpn:connect": {
-        const ok = await proxyManager.connect(msg.country);
+        const country = msg.country;
+        // Respond immediately so popup doesn't block
+        await chrome.storage.local.set({
+          vpnStatus: "connecting",
+          vpnCountry: country,
+        });
+        sendResponse({ ok: true, status: "connecting" });
+
+        // Connection runs independently of popup lifecycle
+        const ok = await proxyManager.connect(country);
         state.vpnConnected = !!ok;
-        sendResponse({ ok: !!ok, vpnConnected: state.vpnConnected });
+
+        if (ok) {
+          const proxy = proxyManager.currentProxy
+            ? {
+                addr: proxyManager.currentProxy.addr,
+                country: proxyManager.currentProxy.country,
+                proxyType: proxyManager.currentProxy.proxyType || "socks5",
+              }
+            : null;
+          await chrome.storage.local.set({
+            vpnStatus: "connected",
+            vpnProxy: proxy,
+          });
+        } else {
+          await chrome.storage.local.set({
+            vpnStatus: "failed",
+            vpnProxy: null,
+          });
+          setTimeout(async () => {
+            const cur = await chrome.storage.local.get("vpnStatus");
+            if (cur.vpnStatus === "failed") {
+              await chrome.storage.local.set({ vpnStatus: "disconnected" });
+            }
+          }, 3000);
+        }
         return;
       }
 
@@ -41,6 +76,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 
       case "node:toggle":
         if (msg.enabled) {
+          if (peerNode.running) await peerNode.stop();
           await peerNode.start(state.bwLimit);
           state.nodeEnabled = true;
           state.uptimeStart = Date.now();
@@ -58,7 +94,36 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       case "settings:bwLimit":
         state.bwLimit = msg.value;
         peerNode.setBandwidthLimit(msg.value);
+        await chrome.storage.local.set({ bwLimit: msg.value });
         break;
+
+      case "nodes:list": {
+        try {
+          const resp = await fetch(
+            "https://bandwi-signaling.dlawodnjs.workers.dev/api/nodes"
+          );
+          const nodes = await resp.json();
+          const countryMap = {};
+          for (const n of nodes) {
+            countryMap[n.country] = (countryMap[n.country] || 0) + 1;
+          }
+          const countries = Object.entries(countryMap)
+            .sort((a, b) => b[1] - a[1])
+            .map(([code, count]) => ({ code, count }));
+          await chrome.storage.local.set({
+            cachedCountries: countries,
+            cachedAt: Date.now(),
+          });
+          sendResponse({ ok: true, countries });
+        } catch {
+          const cached = await chrome.storage.local.get("cachedCountries");
+          sendResponse({
+            ok: false,
+            countries: cached.cachedCountries || [],
+          });
+        }
+        return;
+      }
 
       case "state:get":
         if (state.uptimeStart) {
@@ -71,13 +136,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     }
     sendResponse({ ok: true });
   })();
-  return true; // async sendResponse
+  return true;
 });
 
 // ── Auto-enable node sharing on first install ─────────────
 chrome.runtime.onInstalled.addListener(async (details) => {
   if (details.reason === "install") {
-    // Free users share their node by default
     await peerNode.start(state.bwLimit);
     state.nodeEnabled = true;
     state.uptimeStart = Date.now();
@@ -85,17 +149,28 @@ chrome.runtime.onInstalled.addListener(async (details) => {
   }
 });
 
-// Restore node state when service worker wakes up
+// ── Restore all state when service worker wakes up ────────
 (async () => {
-  const stored = await chrome.storage.local.get("nodeEnabled");
+  const stored = await chrome.storage.local.get(["nodeEnabled", "bwLimit"]);
+
+  // Restore bandwidth setting
+  if (stored.bwLimit) state.bwLimit = stored.bwLimit;
+
+  // Restore node state
   if (stored.nodeEnabled && !state.nodeEnabled) {
     await peerNode.start(state.bwLimit);
     state.nodeEnabled = true;
     state.uptimeStart = Date.now();
   }
+
+  // Restore VPN state (re-applies PAC script, clears stale "connecting")
+  const vpnRestored = await proxyManager.restore();
+  if (vpnRestored) {
+    state.vpnConnected = true;
+  }
 })();
 
-// ── Keep-alive alarm (Manifest V3 service workers can idle) ─
+// ── Keep-alive alarm ──────────────────────────────────────
 chrome.alarms.create("keepalive", { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === "keepalive" && state.nodeEnabled) {

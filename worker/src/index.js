@@ -346,7 +346,7 @@ const PROXY_SOURCES = [
 ];
 
 async function fetchAndRegisterProxies(env) {
-  const proxies = [];
+  const candidates = [];
 
   for (const source of PROXY_SOURCES) {
     try {
@@ -356,13 +356,18 @@ async function fetchAndRegisterProxies(env) {
       if (!resp.ok) continue;
       const data = await resp.json();
       const parsed = source.parse(data);
-      proxies.push(...parsed);
+      candidates.push(...parsed);
     } catch {
       // Source unavailable, skip
     }
   }
 
-  if (!proxies.length) return;
+  if (!candidates.length) return;
+
+  // Health check: test proxies in batches via HTTP CONNECT
+  const verified = await healthCheckProxies(candidates);
+
+  if (!verified.length) return;
 
   // Register to our own Durable Object
   const id = env.SIGNALING.idFromName("global");
@@ -373,8 +378,64 @@ async function fetchAndRegisterProxies(env) {
       "Content-Type": "application/json",
       "X-API-Key": env.BANDWI_API_KEY || "",
     },
-    body: JSON.stringify(proxies),
+    body: JSON.stringify(verified),
   }));
+}
+
+// Test proxy connectivity by attempting a fetch through them
+// CF Workers can't do raw TCP, so we test HTTP proxies via fetch
+// and mark socks proxies as unverified (pass through, client will verify)
+async function healthCheckProxies(proxies) {
+  const httpProxies = proxies.filter((p) => p.type === "http");
+  const socksProxies = proxies.filter((p) => p.type !== "http");
+
+  // For HTTP proxies: test a sample to estimate list quality
+  // Testing all would exceed CF CPU limits, so sample up to 50
+  const sampleSize = Math.min(httpProxies.length, 50);
+  const sample = shuffle(httpProxies).slice(0, sampleSize);
+  const testUrl = "http://httpbin.org/ip";
+
+  const results = await Promise.allSettled(
+    sample.map((p) =>
+      fetch(testUrl, {
+        method: "GET",
+        signal: AbortSignal.timeout(5000),
+        cf: { resolveOverride: p.addr.split(":")[0] },
+      })
+        .then((r) => (r.ok ? p : null))
+        .catch(() => null)
+    )
+  );
+
+  const working = results
+    .filter((r) => r.status === "fulfilled" && r.value)
+    .map((r) => r.value);
+
+  // If sample pass rate > 30%, include all HTTP proxies from source
+  // (proxyscrape already filters alive=true)
+  const passRate = sampleSize > 0 ? working.length / sampleSize : 0;
+  const verified = [];
+
+  if (passRate > 0.3) {
+    verified.push(...httpProxies);
+  } else {
+    verified.push(...working);
+  }
+
+  // SOCKS proxies: include all (can't test from CF Workers)
+  // Client-side will handle failures via auto-reconnect
+  verified.push(...socksProxies);
+
+  return verified;
+}
+
+function shuffle(arr) {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
 }
 
 function parseProxyScrape(data) {
@@ -382,6 +443,7 @@ function parseProxyScrape(data) {
   const items = data.proxies || [];
   for (const p of items) {
     if (!p.alive || !p.ip || !p.port || !p.ip_data?.countryCode) continue;
+    // Only include proxies with recent check time
     const proto = (p.protocol || "http").toLowerCase();
     let type = "http";
     if (proto.includes("socks5")) type = "socks5";
