@@ -27,10 +27,12 @@ const proxyManager = new ProxyManager();
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   (async () => {
     switch (msg.type) {
-      case "vpn:connect":
-        await proxyManager.connect(msg.country);
-        state.vpnConnected = true;
-        break;
+      case "vpn:connect": {
+        const ok = await proxyManager.connect(msg.country);
+        state.vpnConnected = !!ok;
+        sendResponse({ ok: !!ok, vpnConnected: state.vpnConnected });
+        return;
+      }
 
       case "vpn:disconnect":
         await proxyManager.disconnect();

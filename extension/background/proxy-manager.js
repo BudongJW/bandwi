@@ -12,12 +12,10 @@ export class ProxyManager {
   }
 
   async connect(country) {
-    // TODO: Query signaling server for available node in target country
-    // For now, use a placeholder that demonstrates the chrome.proxy API flow
     const node = await this._findNode(country);
     if (!node) {
       console.warn(`[Bandwi] No available node in ${country}`);
-      return;
+      return false;
     }
 
     this.currentProxy = node;
@@ -37,6 +35,7 @@ export class ProxyManager {
 
     await chrome.proxy.settings.set({ value: config, scope: "regular" });
     console.log(`[Bandwi] VPN connected via ${node.addr} (${country})`);
+    return true;
   }
 
   async disconnect() {

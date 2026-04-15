@@ -8,7 +8,58 @@ const nodeStats = $("nodeStats");
 const bwLimit = $("bwLimit");
 const bwValue = $("bwValue");
 
+const countryHint = $("countryHint");
+const API_BASE = "https://bandwi-signaling.dlawodnjs.workers.dev";
+const COUNTRY_NAMES = {
+  KR: "South Korea",
+  US: "United States",
+  JP: "Japan",
+  SG: "Singapore",
+  DE: "Germany",
+  GB: "United Kingdom",
+  FR: "France",
+  CA: "Canada",
+  AU: "Australia",
+  IN: "India",
+};
+
 let vpnConnected = false;
+
+// ── Load Available Countries from Server ───────────────────
+(async function loadCountries() {
+  const select = $("country");
+  try {
+    const resp = await fetch(`${API_BASE}/api/nodes`);
+    const nodes = await resp.json();
+    // Collect unique countries with node counts
+    const countryMap = {};
+    for (const n of nodes) {
+      countryMap[n.country] = (countryMap[n.country] || 0) + 1;
+    }
+    const countries = Object.entries(countryMap).sort((a, b) => b[1] - a[1]);
+
+    select.innerHTML = "";
+    if (countries.length === 0) {
+      select.innerHTML = '<option value="" disabled selected>No nodes available</option>';
+      countryHint.textContent = "Waiting for peer nodes to come online...";
+      btnConnect.disabled = true;
+    } else {
+      for (const [code, count] of countries) {
+        const name = COUNTRY_NAMES[code] || code;
+        const opt = document.createElement("option");
+        opt.value = code;
+        opt.textContent = `${name} (${count} node${count > 1 ? "s" : ""})`;
+        select.appendChild(opt);
+      }
+      countryHint.textContent = `${countries.length} country available`;
+      btnConnect.disabled = false;
+    }
+  } catch {
+    select.innerHTML = '<option value="" disabled selected>Server offline</option>';
+    countryHint.textContent = "Could not reach signaling server";
+    btnConnect.disabled = true;
+  }
+})();
 
 // ── VPN Connect / Disconnect ───────────────────────────────
 btnConnect.addEventListener("click", async () => {
@@ -17,8 +68,14 @@ btnConnect.addEventListener("click", async () => {
     setVpnState(false);
   } else {
     const country = $("country").value;
-    await chrome.runtime.sendMessage({ type: "vpn:connect", country });
-    setVpnState(true);
+    if (!country) return;
+    const result = await chrome.runtime.sendMessage({ type: "vpn:connect", country });
+    if (result && result.ok) {
+      setVpnState(true);
+      countryHint.textContent = "";
+    } else {
+      countryHint.textContent = "No available node in this country";
+    }
   }
 });
 
