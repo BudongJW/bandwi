@@ -1,0 +1,35 @@
+{
+  "name": "@budongjw/bandwi",
+  "version": "0.1.0",
+  "description": "Free VPN Chrome extension powered by P2P residential proxy network",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BudongJW/bandwi.git"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "files": [
+    "extension/",
+    "worker/src/",
+    "worker/wrangler.toml",
+    "worker/package.json",
+    "server/signaling.js",
+    "server/package.json",
+    "store/",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "vpn",
+    "proxy",
+    "p2p",
+    "chrome-extension",
+    "residential-proxy",
+    "webrtc",
+    "cloudflare-workers"
+  ],
+  "license": "MIT",
+  "author": "BudongJW"
+}
