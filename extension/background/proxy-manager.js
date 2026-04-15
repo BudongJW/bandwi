@@ -20,7 +20,19 @@ export class ProxyManager {
 
     this.currentProxy = node;
 
-    // Set PAC script to route traffic through the proxy node
+    // Determine proxy directive based on node type
+    // Static proxies have proxyType (http, socks5, socks4)
+    // P2P nodes use SOCKS5 by default
+    const pType = node.proxyType || "socks5";
+    let proxyDirective;
+    if (pType === "http" || pType === "https") {
+      proxyDirective = `PROXY ${node.addr}`;
+    } else if (pType === "socks4") {
+      proxyDirective = `SOCKS ${node.addr}`;
+    } else {
+      proxyDirective = `SOCKS5 ${node.addr}`;
+    }
+
     const config = {
       mode: "pac_script",
       pacScript: {
@@ -28,7 +40,7 @@ export class ProxyManager {
           if (isPlainHostName(host) || host === "localhost") {
             return "DIRECT";
           }
-          return "SOCKS5 ${node.addr}; DIRECT";
+          return "${proxyDirective}; DIRECT";
         }`,
       },
     };

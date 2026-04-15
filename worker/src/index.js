@@ -23,11 +23,14 @@ export default {
   },
 };
 
+// Simple API key for proxy registration (prevents abuse)
+const API_KEY = "bandwi-gaechoo-bridge-2026";
+
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, X-API-Key",
   };
 }
 
@@ -36,11 +39,14 @@ export class SignalingDO {
   constructor(state, env) {
     this.state = state;
     this.env = env;
-    // nodeId -> { ws, addr, country, bwLimit, lastSeen }
+    // nodeId -> { ws, addr, country, bwLimit, lastSeen, type }
+    //   type: "p2p" (WebSocket-connected) | "static" (registered via API)
     this.nodes = new Map();
     // clientId -> { ws, connectedNode }
     this.clients = new Map();
     this.idCounter = 0;
+    // Static proxy TTL: 30 minutes
+    this.STATIC_TTL_MS = 30 * 60 * 1000;
   }
 
   nextId() {
@@ -59,6 +65,7 @@ export class SignalingDO {
     }
 
     if (request.method === "GET" && url.pathname === "/api/nodes") {
+      this._cleanExpiredStatic();
       const country = url.searchParams.get("country");
       const result = [];
       for (const [id, node] of this.nodes) {
@@ -68,10 +75,69 @@ export class SignalingDO {
             addr: node.addr,
             country: node.country,
             bwLimit: node.bwLimit,
+            type: node.type || "p2p",
+            proxyType: node.proxyType || null,
           });
         }
       }
       return jsonResponse(result);
+    }
+
+    // ── Static Proxy Registration (from gaechoo pipeline) ─────
+    if (request.method === "POST" && url.pathname === "/api/nodes/register") {
+      const apiKey = request.headers.get("X-API-Key");
+      if (apiKey !== API_KEY) {
+        return jsonResponse({ error: "unauthorized" }, 401);
+      }
+
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return jsonResponse({ error: "invalid json" }, 400);
+      }
+
+      const proxies = Array.isArray(body) ? body : body.proxies || [];
+      if (!proxies.length) {
+        return jsonResponse({ error: "empty proxy list" }, 400);
+      }
+
+      // Clean expired static nodes first
+      this._cleanExpiredStatic();
+
+      let added = 0;
+      const byCountry = {};
+      for (const p of proxies) {
+        if (!p.addr || !p.country) continue;
+        // Deduplicate by addr
+        const existing = [...this.nodes.values()].find(
+          (n) => n.addr === p.addr
+        );
+        if (existing) {
+          existing.lastSeen = Date.now();
+          continue;
+        }
+
+        const nodeId = `static_${++this.idCounter}`;
+        this.nodes.set(nodeId, {
+          ws: null,
+          addr: p.addr,
+          country: p.country.toUpperCase(),
+          proxyType: p.type || "http", // http, socks5, socks4
+          bwLimit: 0,
+          lastSeen: Date.now(),
+          type: "static",
+        });
+        added++;
+        byCountry[p.country] = (byCountry[p.country] || 0) + 1;
+      }
+
+      return jsonResponse({
+        ok: true,
+        added,
+        total: this.nodes.size,
+        byCountry,
+      });
     }
 
     // ── WebSocket Upgrade (must check before catch-all routes) ─
@@ -188,9 +254,18 @@ export class SignalingDO {
     }
   }
 
+  // Clean expired static proxy nodes (TTL-based)
+  _cleanExpiredStatic() {
+    const now = Date.now();
+    for (const [id, node] of this.nodes) {
+      if (node.type === "static" && now - node.lastSeen > this.STATIC_TTL_MS) {
+        this.nodes.delete(id);
+      }
+    }
+  }
+
   // Durable Objects auto-hibernate when no connections remain.
-  // No need for manual cleanup intervals -- stale entries are
-  // removed on WebSocket close event.
+  // P2P nodes cleaned on WebSocket close; static nodes cleaned on TTL.
 }
 
 // ── Helpers ────────────────────────────────────────────────
