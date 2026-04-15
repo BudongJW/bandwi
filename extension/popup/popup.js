@@ -58,7 +58,8 @@ function applyVpnStatus(status, proxy, country) {
       countryHint.textContent = "";
       if (proxy) {
         const cName = COUNTRY_NAMES[proxy.country] || proxy.country;
-        statusDetail.textContent = `${cName} / ${proxy.addr} (${proxy.proxyType})`;
+        const exitIp = proxy.exitIp || proxy.addr;
+        statusDetail.textContent = `${cName} / ${exitIp} (${proxy.proxyType})`;
         // Show connected country in dropdown
         select.innerHTML = "";
         const opt = document.createElement("option");

@@ -42,8 +42,11 @@ export class ProxyManager {
     ]);
 
     // Clear stale "connecting" state (SW died mid-connect)
+    // Also clear any leftover PAC script from the interrupted connection
     if (stored.vpnStatus === "connecting") {
+      await chrome.proxy.settings.clear({ scope: "regular" });
       await chrome.storage.local.set({ vpnStatus: "disconnected" });
+      await chrome.storage.local.remove(["vpnConnected", "vpnCountry", "vpnProxy"]);
       return false;
     }
 
@@ -53,6 +56,11 @@ export class ProxyManager {
       // Re-apply PAC script (chrome.proxy doesn't persist across SW restarts)
       await this._applyPac(stored.vpnProxy);
       return true;
+    }
+
+    // No VPN state but PAC might be lingering from a crash
+    if (!stored.vpnStatus || stored.vpnStatus === "disconnected") {
+      await chrome.proxy.settings.clear({ scope: "regular" });
     }
     return false;
   }
@@ -119,47 +127,54 @@ export class ProxyManager {
     this.currentProxy = node;
     const pType = node.proxyType || "socks5";
 
-    // Apply PAC with DIRECT bypass for verification URL
     await this._applyPac(node);
 
-    // Verify: fetch through the proxy to confirm it works
-    // We need to test a URL that DOES go through the proxy
-    // Use a non-bypassed URL for the actual verification
-    const works = await this._verifyConnectivity();
-    if (!works) return false;
+    // Verify proxy works and get actual exit IP/country
+    const exitInfo = await this._verifyConnectivity();
+    if (!exitInfo) return false;
 
-    // Persist state
+    // Use actual exit country from verification, not the registered country
+    const proxyInfo = {
+      addr: node.addr,
+      country: exitInfo.countryCode || node.country,
+      proxyType: pType,
+      exitIp: exitInfo.ip,
+    };
+
+    this.currentProxy = proxyInfo;
+
     await chrome.storage.local.set({
       vpnStatus: "connected",
       vpnConnected: true,
       vpnCountry: this.currentCountry,
-      vpnProxy: { addr: node.addr, country: node.country, proxyType: pType },
+      vpnProxy: proxyInfo,
     });
 
     console.log(
-      `[Bandwi] VPN connected via ${node.addr} (${this.currentCountry})`
+      `[Bandwi] VPN connected via ${node.addr}, exit IP: ${exitInfo.ip} (${exitInfo.countryCode})`
     );
     return true;
   }
 
+  // Returns { ip, countryCode } or null on failure
   async _verifyConnectivity() {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), VERIFY_TIMEOUT_MS);
 
-      // httpbin.org is in the DIRECT bypass list, so this tests direct connectivity
-      // To test the proxy itself, we fetch a different URL that goes through the proxy
-      const resp = await fetch("http://ip-api.com/json/?fields=query,country", {
-        signal: controller.signal,
-      });
+      const resp = await fetch(
+        "http://ip-api.com/json/?fields=query,countryCode",
+        { signal: controller.signal }
+      );
       clearTimeout(timer);
 
-      if (!resp.ok) return false;
+      if (!resp.ok) return null;
       const data = await resp.json();
-      console.log(`[Bandwi] Proxy verified, exit IP: ${data.query}`);
-      return true;
+      if (!data.query) return null;
+      console.log(`[Bandwi] Proxy verified, exit: ${data.query} (${data.countryCode})`);
+      return { ip: data.query, countryCode: data.countryCode };
     } catch {
-      return false;
+      return null;
     }
   }
 
