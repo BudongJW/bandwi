@@ -23,8 +23,8 @@ export default {
   },
 };
 
-// Simple API key for proxy registration (prevents abuse)
-const API_KEY = "bandwi-gaechoo-bridge-2026";
+// API key loaded from CF Workers secret (wrangler secret put BANDWI_API_KEY)
+// Passed to Durable Object via env binding
 
 function corsHeaders() {
   return {
@@ -86,7 +86,7 @@ export class SignalingDO {
     // ── Static Proxy Registration (from gaechoo pipeline) ─────
     if (request.method === "POST" && url.pathname === "/api/nodes/register") {
       const apiKey = request.headers.get("X-API-Key");
-      if (apiKey !== API_KEY) {
+      if (!this.env.BANDWI_API_KEY || apiKey !== this.env.BANDWI_API_KEY) {
         return jsonResponse({ error: "unauthorized" }, 401);
       }
 
