@@ -44,6 +44,12 @@ export class ProxyManager {
     // Clear stale "connecting" state (SW died mid-connect)
     // Also clear any leftover PAC script from the interrupted connection
     if (stored.vpnStatus === "connecting") {
+      try {
+        await chrome.proxy.settings.set({
+          value: { mode: "direct" },
+          scope: "regular",
+        });
+      } catch {}
       await chrome.proxy.settings.clear({ scope: "regular" });
       await chrome.storage.local.set({ vpnStatus: "disconnected" });
       await chrome.storage.local.remove(["vpnConnected", "vpnCountry", "vpnProxy"]);
@@ -60,6 +66,12 @@ export class ProxyManager {
 
     // No VPN state but PAC might be lingering from a crash
     if (!stored.vpnStatus || stored.vpnStatus === "disconnected") {
+      try {
+        await chrome.proxy.settings.set({
+          value: { mode: "direct" },
+          scope: "regular",
+        });
+      } catch {}
       await chrome.proxy.settings.clear({ scope: "regular" });
     }
     return false;
@@ -115,7 +127,8 @@ export class ProxyManager {
           if (isPlainHostName(host) || host === "localhost") return "DIRECT";
           if (host === "${SIGNALING_HOST}") return "DIRECT";
           if (host === "${VERIFY_HOST}") return "DIRECT";
-          return "${proxyDirective}";
+          if (host === "ip-api.com") return "DIRECT";
+          return "${proxyDirective}; DIRECT";
         }`,
       },
     };
@@ -226,7 +239,16 @@ export class ProxyManager {
 
   async disconnect() {
     this._connectionSeq++;
+
+    // Force immediate DIRECT, then clear — ensures no stale PAC lingers
+    try {
+      await chrome.proxy.settings.set({
+        value: { mode: "direct" },
+        scope: "regular",
+      });
+    } catch {}
     await chrome.proxy.settings.clear({ scope: "regular" });
+
     this.currentProxy = null;
     this.currentCountry = null;
     this.failedAddrs.clear();
