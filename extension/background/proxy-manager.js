@@ -49,7 +49,7 @@ export class ProxyManager {
     if (stored.vpnStatus === "connected" && stored.vpnCountry && stored.vpnProxy) {
       this.currentCountry = stored.vpnCountry;
       this.currentProxy = stored.vpnProxy;
-      await this._applyPac(stored.vpnProxy, true);
+      await this._applyPac(stored.vpnProxy);
       return true;
     }
 
@@ -93,10 +93,7 @@ export class ProxyManager {
     return false;
   }
 
-  // Build PAC script
-  // strict=false: add DIRECT fallback (for active use)
-  // strict=true:  no fallback (for verification — must go through proxy)
-  _buildPac(node, strict) {
+  _buildPac(node) {
     const pType = node.proxyType || "socks5";
     let directive;
     if (pType === "http" || pType === "https") {
@@ -107,22 +104,22 @@ export class ProxyManager {
       directive = `SOCKS5 ${node.addr}`;
     }
 
-    const fallback = strict ? "" : "; DIRECT";
-
+    // No DIRECT fallback — proxy failure shows error page
+    // and triggers auto-reconnect. This prevents IP leaks.
     return {
       mode: "pac_script",
       pacScript: {
         data: `function FindProxyForURL(url, host) {
           if (isPlainHostName(host) || host === "localhost") return "DIRECT";
           if (host === "${SIGNALING_HOST}") return "DIRECT";
-          return "${directive}${fallback}";
+          return "${directive}";
         }`,
       },
     };
   }
 
-  async _applyPac(node, withFallback) {
-    const config = this._buildPac(node, !withFallback);
+  async _applyPac(node) {
+    const config = this._buildPac(node);
     await chrome.proxy.settings.set({ value: config, scope: "regular" });
   }
 
@@ -130,20 +127,16 @@ export class ProxyManager {
     this.currentProxy = node;
     const pType = node.proxyType || "socks5";
 
-    // Phase 1: strict PAC (no DIRECT fallback) — verify through proxy
-    await this._applyPac(node, false);
+    await this._applyPac(node);
 
     const exitInfo = await this._verifyConnectivity();
     if (!exitInfo) return false;
 
-    // Check that exit IP is different from our real IP
+    // Reject proxies that leak our real IP
     if (this._myIp && exitInfo.ip === this._myIp) {
       console.warn(`[Bandwi] Proxy ${node.addr} leaks real IP, skipping`);
       return false;
     }
-
-    // Phase 2: switch to resilient PAC (with DIRECT fallback)
-    await this._applyPac(node, true);
 
     const proxyInfo = {
       addr: node.addr,
