@@ -6,7 +6,9 @@
 import { PeerNode } from "./peer-node.js";
 import { ProxyManager } from "./proxy-manager.js";
 
-const SIGNALING_URL = "ws://localhost:8787";
+// Production: wss://bandwi-signaling.<your-subdomain>.workers.dev
+// Local dev:  ws://localhost:8787
+const SIGNALING_URL = "wss://bandwi-signaling.dlawodnjs.workers.dev";
 
 const state = {
   vpnConnected: false,

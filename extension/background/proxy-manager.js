@@ -56,7 +56,7 @@ export class ProxyManager {
     // POST /api/nodes?country=XX -> { addr, peerId, country, bwLimit }
     try {
       const resp = await fetch(
-        `http://localhost:8787/api/nodes?country=${country}`
+        `https://bandwi-signaling.dlawodnjs.workers.dev/api/nodes?country=${country}`
       );
       if (!resp.ok) return null;
       const nodes = await resp.json();

@@ -27,9 +27,11 @@ bandwi/
     popup/             # UI - connect/disconnect, node toggle, stats
     background/        # Service Worker, WebRTC peer node, proxy manager
     icons/
-  server/              # Signaling & Registry Server (Node.js)
-    signaling.js       # WebSocket signaling + REST API
-    package.json
+  worker/              # Cloudflare Workers + Durable Objects (serverless)
+    src/index.js       # WebSocket signaling + REST API
+    wrangler.toml
+  server/              # Local dev signaling server (Node.js)
+    signaling.js
 ```
 
 ### Key Components
@@ -38,19 +40,10 @@ bandwi/
 |-----------|-----------|------|
 | VPN Routing | `chrome.proxy` API + PAC script | Route browser traffic through peer SOCKS5 |
 | P2P Transport | WebRTC Data Channel | Direct peer-to-peer proxy relay |
-| Signaling | WebSocket (ws) | Peer discovery and WebRTC offer/answer exchange |
-| Node Registry | In-memory Map + REST API | Track available nodes by country |
+| Signaling | Cloudflare Workers + Durable Objects | Serverless peer discovery and WebRTC relay |
+| Node Registry | Durable Object in-memory Map + REST API | Track available nodes by country |
 
 ## Quick Start
-
-### Signaling Server
-
-```bash
-cd server
-npm install
-npm start
-# Server runs on :8787
-```
 
 ### Chrome Extension
 
@@ -68,16 +61,6 @@ Unlike Hola VPN, Bandwi is built on **transparent consent**:
 - **Traffic filtering** blocks access to private networks (127.x, 10.x, 192.168.x, 172.16-31.x) and dangerous ports (SSH, SMTP, SMB, RDP)
 - All proxy requests are logged locally for user review
 - Open source — verify the code yourself
-
-## Roadmap
-
-- [ ] MVP Chrome extension with basic P2P proxy
-- [ ] GeoIP-based node country detection
-- [ ] End-to-end encryption for relayed traffic
-- [ ] Node reputation and reliability scoring
-- [ ] Mobile app (Android/iOS)
-- [ ] B2B API for residential proxy access
-- [ ] Token-based incentive system for node contributors
 
 ## License
 
@@ -114,9 +97,11 @@ bandwi/
     popup/             # UI - 连接/断开、节点开关、统计
     background/        # Service Worker、WebRTC对等节点、代理管理器
     icons/
-  server/              # 信令和注册服务器 (Node.js)
-    signaling.js       # WebSocket信令 + REST API
-    package.json
+  worker/              # Cloudflare Workers + Durable Objects（无服务器）
+    src/index.js       # WebSocket信令 + REST API
+    wrangler.toml
+  server/              # 本地开发信令服务器 (Node.js)
+    signaling.js
 ```
 
 ### 核心组件
@@ -125,19 +110,10 @@ bandwi/
 |------|------|------|
 | VPN路由 | `chrome.proxy` API + PAC脚本 | 通过对等SOCKS5路由浏览器流量 |
 | P2P传输 | WebRTC Data Channel | 点对点直接代理转发 |
-| 信令 | WebSocket (ws) | 节点发现和WebRTC offer/answer交换 |
-| 节点注册 | 内存Map + REST API | 按国家跟踪可用节点 |
+| 信令 | Cloudflare Workers + Durable Objects | 无服务器节点发现和WebRTC中继 |
+| 节点注册 | Durable Object内存Map + REST API | 按国家跟踪可用节点 |
 
 ## 快速开始
-
-### 信令服务器
-
-```bash
-cd server
-npm install
-npm start
-# 服务器运行在 :8787
-```
 
 ### Chrome扩展
 
@@ -155,16 +131,6 @@ npm start
 - **流量过滤**阻止访问私有网络（127.x、10.x、192.168.x、172.16-31.x）和危险端口（SSH、SMTP、SMB、RDP）
 - 所有代理请求在本地记录，供用户查看
 - 开源——你可以自行验证代码
-
-## 开发路线
-
-- [ ] MVP Chrome扩展，基础P2P代理功能
-- [ ] 基于GeoIP的节点国家检测
-- [ ] 中继流量端到端加密
-- [ ] 节点信誉和可靠性评分
-- [ ] 移动应用（Android/iOS）
-- [ ] B2B API，提供住宅代理访问
-- [ ] 基于代币的节点贡献者激励系统
 
 ## 许可证
 
